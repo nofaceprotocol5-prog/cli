@@ -14,6 +14,11 @@ mock.module("../../lib/config.ts", () => ({
   removeProfile: (...args: unknown[]) => mockRemoveProfile(...args),
 }));
 
+const mockGetGitRepoRoot = mock();
+mock.module("../../lib/git.ts", () => ({
+  getGitRepoRoot: (...args: unknown[]) => mockGetGitRepoRoot(...args),
+}));
+
 const mockConfirm = mock();
 mock.module("@inquirer/prompts", () => ({
   confirm: (...args: unknown[]) => mockConfirm(...args),
@@ -26,6 +31,10 @@ const mockProfile = {
   profile: { workspaceId: "", appId: "app_123", instances: { development: "ins_dev" } },
 };
 
+function capturedOutput(spy: ReturnType<typeof spyOn>): string {
+  return spy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+}
+
 describe("unlink", () => {
   let consoleSpy: ReturnType<typeof spyOn>;
   let errorSpy: ReturnType<typeof spyOn>;
@@ -36,6 +45,8 @@ describe("unlink", () => {
     mockIsHuman.mockReset();
     mockResolveProfile.mockReset();
     mockRemoveProfile.mockReset();
+    mockGetGitRepoRoot.mockReset();
+    mockGetGitRepoRoot.mockResolvedValue("/repo");
     mockConfirm.mockReset();
     consoleSpy?.mockRestore();
     errorSpy?.mockRestore();
@@ -117,7 +128,7 @@ describe("unlink", () => {
       await unlink();
 
       expect(mockRemoveProfile).not.toHaveBeenCalled();
-      const output = consoleSpy.mock.calls.map((c) => c[0]).join("\n");
+      const output = capturedOutput(consoleSpy);
       expect(output).toContain("Aborted");
     });
   });
@@ -132,7 +143,7 @@ describe("unlink", () => {
 
       await unlink({ yes: true });
 
-      const output = consoleSpy.mock.calls.map((c) => c[0]).join("\n");
+      const output = capturedOutput(consoleSpy);
       expect(output).toContain("Unlinked");
     });
   });
