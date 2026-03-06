@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { _setConfigDir, setProfile } from "../../lib/config";
+import { _setTokenOverride } from "../../lib/credential-store";
 
 describe("config push", () => {
   const originalEnv = { ...process.env };
@@ -35,6 +36,7 @@ describe("config push", () => {
 
   afterEach(async () => {
     _setConfigDir(undefined);
+    _setTokenOverride(undefined);
     process.env = { ...originalEnv };
     globalThis.fetch = originalFetch;
     logSpy.mockRestore();
@@ -69,6 +71,7 @@ describe("config push", () => {
       instances: { development: "ins_dev" },
     });
     delete process.env.CLERK_PLATFORM_API_KEY;
+    _setTokenOverride(null);
 
     await expect(runConfigPatch({ json: '{"a":1}', yes: true })).rejects.toThrow("process.exit");
     expect(errorSpy).toHaveBeenCalledWith(

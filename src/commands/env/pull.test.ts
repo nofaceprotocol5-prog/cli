@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { _setConfigDir, setProfile } from "../../lib/config";
+import { _setTokenOverride } from "../../lib/credential-store";
 
 describe("env pull", () => {
   const originalEnv = { ...process.env };
@@ -56,6 +57,7 @@ describe("env pull", () => {
 
   afterEach(async () => {
     _setConfigDir(undefined);
+    _setTokenOverride(undefined);
     process.env = { ...originalEnv };
     process.cwd = originalCwd;
     globalThis.fetch = originalFetch;
@@ -83,6 +85,7 @@ describe("env pull", () => {
       instances: { development: "ins_dev" },
     });
     delete process.env.CLERK_PLATFORM_API_KEY;
+    _setTokenOverride(null);
 
     await expect(runEnvPull()).rejects.toThrow("process.exit");
     expect(errorSpy).toHaveBeenCalledWith(
