@@ -13,6 +13,10 @@ import { configSchema } from "./commands/config/schema.js";
 import { api } from "./commands/api/index.js";
 import { link } from "./commands/link/index.js";
 import { unlink } from "./commands/unlink/index.js";
+import { CliError, UserAbortError, ApiError, EXIT_CODE, throwUsageError } from "./lib/errors.js";
+import { red } from "./lib/color.js";
+
+process.on("SIGINT", () => process.exit(EXIT_CODE.SIGINT));
 
 program
   .name("clerk")
@@ -21,14 +25,14 @@ program
   .option(
     "--mode <mode>",
     "Force interaction mode (human or agent). Defaults to auto-detect based on TTY.",
-  );
+  )
+  .option("--verbose", "Show detailed error output");
 
 program.hook("preAction", () => {
   const opts = program.opts();
   if (opts.mode) {
     if (opts.mode !== "human" && opts.mode !== "agent") {
-      console.error(`Invalid mode "${opts.mode}". Must be "human" or "agent".`);
-      process.exit(1);
+      throwUsageError(`Invalid mode "${opts.mode}". Must be "human" or "agent".`);
     }
     setMode(opts.mode as Mode);
   }
@@ -124,4 +128,63 @@ program
   .option("--debug", "Show debug output")
   .action(deploy);
 
-program.parse();
+function formatApiBody(body: string, verbose: boolean): string {
+  if (verbose) {
+    try {
+      return "\n" + JSON.stringify(JSON.parse(body), null, 2);
+    } catch {
+      return "\n" + body;
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed.errors?.[0]?.message) return parsed.errors[0].message;
+    if (parsed.error) return parsed.error;
+    if (parsed.message) return parsed.message;
+  } catch {
+    // not JSON
+  }
+
+  if (body.length > 200) return body.slice(0, 200) + "...";
+  return body;
+}
+
+async function main(): Promise<void> {
+  try {
+    await program.parseAsync();
+  } catch (error) {
+    const verbose = program.opts().verbose ?? false;
+
+    if (error instanceof UserAbortError) {
+      process.exit(EXIT_CODE.SUCCESS);
+    }
+
+    if (error instanceof CliError) {
+      if (error.message) {
+        console.error(red(`error: ${error.message}`));
+      }
+      if (error.docsUrl) {
+        console.error(`\nFor more information, see: ${error.docsUrl}`);
+      }
+      process.exit(error.exitCode);
+    }
+
+    if (error instanceof ApiError) {
+      const detail = formatApiBody(error.body, verbose);
+      const prefix = error.context ?? "Request failed";
+      console.error(red(`error: ${prefix} (${error.status}): ${detail}`));
+      process.exit(EXIT_CODE.GENERAL);
+    }
+
+    if (error instanceof Error) {
+      console.error(red(`error: ${error.message}`));
+      process.exit(EXIT_CODE.GENERAL);
+    }
+
+    console.error(red("error: An unexpected error occurred"));
+    process.exit(EXIT_CODE.GENERAL);
+  }
+}
+
+main();
