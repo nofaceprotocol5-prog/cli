@@ -1,110 +1,149 @@
-import { join } from "node:path";
-import { login } from "../auth/login.ts";
-import { link } from "../link/index.ts";
-import { pull } from "../env/pull.ts";
-import { detectFramework } from "../../lib/framework.ts";
-import { isAgent } from "../../mode.ts";
-import { dim, cyan } from "../../lib/color.ts";
+import { login } from "../auth/login.js";
+import { link } from "../link/index.js";
+import { pull } from "../env/pull.js";
+import { isAgent } from "../../mode.js";
+import { dim, green, yellow, bold } from "../../lib/color.js";
+import { CliError, throwUserAbort } from "../../lib/errors.js";
+import { lookupFramework, FRAMEWORK_NAMES } from "../../lib/framework.js";
+import { resolveProfile } from "../../lib/config.js";
+import { gatherContext } from "./context.js";
+import { scaffold, enrichProjectContext } from "./scaffold.js";
+import { previewPlan, previewAndConfirm } from "./preview.js";
+import { runFormatters } from "./format.js";
+import { detectAuthLibraries, scanForIssues } from "./scan.js";
+import { buildAgentPrompt, GENERIC_AGENT_PROMPT } from "./prompts/index.js";
+import {
+  installSdk,
+  writePlan,
+  checkGitDirty,
+  printOutro,
+  getAuthenticatedEmail,
+} from "./heuristics.js";
+import type { ProjectContext } from "./frameworks/types.js";
 
-const AGENT_PROMPT = `You are integrating Clerk authentication into an existing project. Follow these steps:
+interface InitOptions {
+  framework?: string;
+  yes?: boolean;
+  prompt?: boolean;
+}
 
-1. Authenticate with Clerk: Run \`clerk auth login\` to log in via the browser.
+export async function init(options: InitOptions = {}) {
+  const cwd = process.cwd();
 
-2. Link a Clerk application: Run \`clerk link\` to associate this directory with a Clerk application.
-
-3. Install the Clerk SDK appropriate for the project's framework:
-   - Next.js: \`@clerk/nextjs\`
-   - React: \`@clerk/clerk-react\`
-   - Express: \`@clerk/express\`
-   - Fastify: \`@clerk/fastify\`
-   - Astro: \`@clerk/astro\`
-   - Tanstack Start: \`@clerk/tanstack-start\`
-   - React Router: \`@clerk/react-router\`
-   - Nuxt: \`@clerk/nuxt\`
-   - Vue: \`@clerk/vue\`
-
-4. Add the environment variable NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY (or the equivalent for your framework) and CLERK_SECRET_KEY to the project's .env.local file. You can retrieve these with \`clerk env pull\`.
-
-5. Set up the Clerk provider at the root of the application:
-   - For Next.js: Wrap the app with \`<ClerkProvider>\` in the root layout.
-   - For React: Wrap the app with \`<ClerkProvider publishableKey={key}>\`.
-   - For Express/Fastify: Use the \`clerkMiddleware()\` middleware.
-
-6. Add sign-in and sign-up routes/components:
-   - Use \`<SignInButton>\` and \`<SignUpButton>\` for trigger buttons.
-   - Use \`<SignIn>\` and \`<SignUp>\` for full-page components.
-   - Use \`<UserButton>\` to show the signed-in user's avatar and menu.
-
-7. Protect routes that require authentication:
-   - Next.js: Use \`clerkMiddleware()\` in \`middleware.ts\` and configure with \`createRouteMatcher\`.
-   - React: Use \`<SignedIn>\` and \`<SignedOut>\` components to conditionally render.
-   - Express/Fastify: Use \`requireAuth()\` middleware on protected routes.
-
-8. Access the current user:
-   - Client-side: \`useUser()\` hook returns the current user object.
-   - Server-side (Next.js): \`auth()\` or \`currentUser()\` from \`@clerk/nextjs/server\`.
-   - Express/Fastify: \`req.auth\` after applying \`clerkMiddleware()\`.
-
-Refer to the Clerk docs at https://clerk.com/docs for framework-specific details.`;
-
-async function detectPackageManager(cwd: string): Promise<{ cmd: string; add: string }> {
-  const checks: Array<{ files: string[]; cmd: string; add: string }> = [
-    { files: ["bun.lockb", "bun.lock"], cmd: "bun", add: "bun add" },
-    { files: ["yarn.lock"], cmd: "yarn", add: "yarn add" },
-    { files: ["pnpm-lock.yaml"], cmd: "pnpm", add: "pnpm add" },
-  ];
-
-  for (const { files, cmd, add } of checks) {
-    for (const file of files) {
-      if (await Bun.file(join(cwd, file)).exists()) {
-        return { cmd, add };
-      }
+  // Resolve --framework override
+  let frameworkOverride;
+  if (options.framework) {
+    frameworkOverride = lookupFramework(options.framework);
+    if (!frameworkOverride) {
+      throw new CliError(
+        `Unknown framework "${options.framework}". Valid values: ${FRAMEWORK_NAMES.join(", ")}`,
+      );
     }
   }
 
-  return { cmd: "npm", add: "npm install" };
-}
+  const ctx = await gatherContext(cwd, frameworkOverride);
 
-async function installSdk(cwd: string, sdk: string, frameworkName: string): Promise<void> {
-  const pm = await detectPackageManager(cwd);
-  console.log(`Installing ${cyan(sdk)} for ${frameworkName}...`);
+  // Populate framework-specific context (variant, layoutPath, middlewareBasename)
+  if (ctx) await enrichProjectContext(ctx);
 
-  const proc = Bun.spawn(pm.add.split(" ").concat(sdk), {
-    cwd,
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const exitCode = await proc.exited;
-
-  if (exitCode !== 0) {
-    console.error(`Failed to install ${sdk}. You can install it manually: ${pm.add} ${sdk}`);
-  }
-}
-
-export async function init() {
-  if (isAgent()) {
-    console.log(AGENT_PROMPT);
+  if (options.prompt || isAgent()) {
+    console.log(ctx ? buildAgentPrompt(ctx) : GENERIC_AGENT_PROMPT);
     return;
   }
 
-  // Step 1: Authenticate the user
+  await authenticateAndLink(cwd);
+  await detectAndInstall(cwd, ctx, options);
+}
+
+async function authenticateAndLink(cwd: string): Promise<void> {
+  // Check if fully ready (authenticated + linked)
+  const email = await getAuthenticatedEmail();
+  const profile = await resolveProfile(cwd);
+
+  if (email && profile) {
+    console.log(dim(`Logged in as ${email} · Linked to ${profile.profile.appId}`));
+    return;
+  }
+
+  // Authenticated but not linked — skip login, just link
+  if (email) {
+    console.log(dim(`Logged in as ${email}`));
+    await link({ skipIfLinked: true });
+    return;
+  }
+
+  // Not authenticated — full flow
   await login();
-
-  // Step 2: Link to a Clerk application
   await link({ skipIfLinked: true });
+}
 
-  const cwd = process.cwd();
-
-  // Step 3: Detect framework and install SDK
-  const fw = await detectFramework(cwd);
-  if (fw) {
-    await installSdk(cwd, fw.sdk, fw.name);
-  } else {
+async function detectAndInstall(
+  cwd: string,
+  ctx: ProjectContext | null,
+  options: InitOptions,
+): Promise<void> {
+  if (!ctx) {
     console.log(
       `Could not detect a framework. Install the appropriate Clerk SDK manually: ${dim("https://clerk.com/docs")}`,
     );
+    return;
   }
 
-  // Step 4: Pull environment variables
+  const variantLabel = ctx.variant ? ` (${ctx.variant})` : "";
+  console.log(`\nDetected ${bold(ctx.framework.name)}${variantLabel}`);
+
+  // Pre-scaffold: detect existing auth libraries
+  detectAuthLibraries(ctx.deps);
+
+  console.log();
+
+  if (ctx.existingClerk) {
+    console.log(dim(`${ctx.framework.sdk} is already installed.`));
+  } else {
+    await installSdk(ctx);
+  }
+
   await pull({});
+  await scaffoldAndWrite(cwd, ctx, options);
+}
+
+async function scaffoldAndWrite(
+  cwd: string,
+  ctx: ProjectContext,
+  options: InitOptions,
+): Promise<void> {
+  const plan = await scaffold(ctx);
+  const hasChanges = plan.actions.some((a) => a.type !== "skip");
+
+  if (!hasChanges && plan.postInstructions.length === 0) {
+    console.log(green("\nClerk is already set up in this project."));
+    return;
+  }
+
+  if (!hasChanges) {
+    console.log(dim("\nNo files to scaffold, but:"));
+    for (const instr of plan.postInstructions) {
+      console.log(dim(`  • ${instr}`));
+    }
+    return;
+  }
+
+  if (await checkGitDirty(cwd)) {
+    console.log(yellow("Warning: You have uncommitted changes."));
+    console.log(dim("Consider committing first so you can review what clerk init creates.\n"));
+  }
+
+  if (options.yes) {
+    previewPlan(plan);
+  } else {
+    const proceed = await previewAndConfirm(plan);
+    if (!proceed) throwUserAbort();
+  }
+
+  const writtenFiles = await writePlan(cwd, plan);
+  await runFormatters(cwd, writtenFiles);
+
+  // Post-scaffold: scan for issues
+  const findings = await scanForIssues(cwd, ctx.framework.dep);
+  printOutro(plan, findings);
 }
