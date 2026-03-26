@@ -78,12 +78,18 @@ export async function fetchInstanceConfigSchema(
 export async function fetchInstanceConfig(
   applicationId: string,
   instanceId: string,
+  keys?: string[],
 ): Promise<Record<string, unknown>> {
   const token = await getAuthToken();
   const url = new URL(
     `/v1/platform/applications/${applicationId}/instances/${instanceId}/config`,
     PLAPI_BASE_URL,
   );
+  if (keys?.length) {
+    for (const key of keys) {
+      url.searchParams.append("keys", key);
+    }
+  }
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${token}`,
