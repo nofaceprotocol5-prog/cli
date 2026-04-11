@@ -2,12 +2,27 @@
  * Install Clerk agent skills after scaffolding.
  *
  * Maps the detected framework to the appropriate skill set from
- * github.com/clerk/skills, then installs via `npx skills add`.
+ * github.com/clerk/skills, then installs via the user's package runner
+ * (bunx, npx, pnpm dlx, or yarn dlx).
+ *
+ * The skills CLI itself handles agent auto-detection and scope selection:
+ * in interactive mode we hand off entirely (no `--agent` / `-y`), so the
+ * user gets the native picker. In non-interactive mode we pass `-y -g`
+ * so it runs unattended with global scope and auto-detected agents.
  */
 
-import { dim, cyan, yellow } from "../../lib/color.js";
+import { dim } from "../../lib/color.js";
 import { isHuman } from "../../mode.js";
-import { confirm } from "../../lib/prompts.js";
+import { log } from "../../lib/log.js";
+import { confirm, select } from "../../lib/prompts.js";
+import {
+  type Runner,
+  detectAvailableRunners,
+  preferredRunner,
+  runnerCommand,
+  runnerForPackageManager,
+} from "../../lib/runners.js";
+import type { ProjectContext } from "./frameworks/types.js";
 
 /** Skills installed regardless of framework. */
 const BASE_SKILLS = ["clerk", "clerk-setup"];
@@ -37,23 +52,26 @@ function resolveSkills(frameworkDep: string | undefined): string[] {
 }
 
 /**
- * Build the argv for `npx skills add`.
+ * Build the runner-agnostic argv for `skills add ...`. The caller prepends
+ * the runner (bunx / npx / pnpm dlx / yarn dlx) via {@link runnerCommand}.
  *
  * Interactive mode: hand off to the skills CLI's native UX (auto-detect
- * installed agents, scope picker). Non-interactive: pass `-y -g` so it
- * runs unattended with global scope and auto-detected agents.
+ * installed agents, scope picker) by omitting `--agent` and `-y`.
+ * Non-interactive: pass `-y -g` so it runs unattended with global scope
+ * and auto-detected agents.
  *
  * Exported for tests.
  */
 export function buildSkillsArgs(skills: string[], interactive: boolean): string[] {
   const skillFlags = skills.flatMap((s) => ["--skill", s]);
   const extraFlags = interactive ? [] : ["-y", "-g"];
-  return ["npx", "skills", "add", SKILLS_SOURCE, ...skillFlags, ...extraFlags];
+  return ["skills", "add", SKILLS_SOURCE, ...skillFlags, ...extraFlags];
 }
 
 export async function installSkills(
   cwd: string,
   frameworkDep: string | undefined,
+  packageManager: ProjectContext["packageManager"] | undefined,
   skipPrompt: boolean,
 ): Promise<void> {
   const skills = resolveSkills(frameworkDep);
@@ -67,18 +85,54 @@ export async function installSkills(
     if (!install) return;
   }
 
-  console.log(`\nInstalling skills: ${cyan(skillList)}`);
+  // Detect runners after the user accepts — no point probing PATH if they decline.
+  const available = detectAvailableRunners();
+  if (available.length === 0) {
+    const suggested = runnerForPackageManager(packageManager);
+    log.blank();
+    log.warn(
+      "No package runner found on PATH (looked for bunx, npx, pnpm, yarn). " +
+        `Install one and run \`${suggested.display} skills add ${SKILLS_SOURCE}\` manually.`,
+    );
+    return;
+  }
+
+  const preferred = preferredRunner(packageManager, available);
+  if (!preferred) {
+    // Defensive: detectAvailableRunners returned a non-empty array above, so
+    // preferredRunner should always find something. This guards against any
+    // future change that decouples the two.
+    const suggested = runnerForPackageManager(packageManager);
+    log.blank();
+    log.warn(
+      `Could not select a package runner. Run \`${suggested.display} skills add ${SKILLS_SOURCE}\` manually.`,
+    );
+    return;
+  }
+
+  // Only prompt when there's an actual choice and the user is interactive.
+  let runner = preferred;
+  if (isHuman() && !skipPrompt && available.length > 1) {
+    runner = await select<Runner>({
+      message: "Which package runner should install the skills?",
+      choices: available.map((r) => ({
+        name: r.id === preferred.id ? `${r.display} ${dim("(detected)")}` : r.display,
+        value: r,
+      })),
+      default: preferred,
+    });
+  }
 
   const interactive = isHuman() && !skipPrompt;
-  const args = buildSkillsArgs(skills, interactive);
+  const command = runnerCommand(runner, buildSkillsArgs(skills, interactive));
+  const displayCommand = `${runner.display} skills add ${SKILLS_SOURCE}`;
 
-  // Skills are optional — soft-fail with a warning rather than tearing down
-  // a successful scaffold. Bun.spawn can throw synchronously when the binary
-  // is missing (e.g. `npx` not on PATH on a minimal CI image), so the
-  // try/catch is needed in addition to the exit code check below.
+  log.blank();
+  log.info(`Installing skills with \`${runner.display}\`: \`${skillList}\``);
+
   let exitCode: number;
   try {
-    const proc = Bun.spawn(args, {
+    const proc = Bun.spawn(command, {
       cwd,
       stdin: "inherit",
       stdout: "inherit",
@@ -86,22 +140,17 @@ export async function installSkills(
     });
     exitCode = await proc.exited;
   } catch {
-    console.log(
-      yellow(
-        `\nCould not run \`npx skills add\`. You can install manually later: npx skills add ${SKILLS_SOURCE}`,
-      ),
-    );
+    log.blank();
+    log.warn(`Could not run \`${displayCommand}\`. You can install manually later.`);
     return;
   }
 
   if (exitCode !== 0) {
-    console.log(
-      yellow(
-        `\nSkills installation failed. You can install manually: npx skills add ${SKILLS_SOURCE}`,
-      ),
-    );
+    log.blank();
+    log.warn(`Skills installation failed. You can install manually: \`${displayCommand}\``);
     return;
   }
 
-  console.log(dim("\nAgent skills installed. AI agents now have Clerk context in this project."));
+  log.blank();
+  log.success("Agent skills installed. AI agents now have Clerk context in this project.");
 }
