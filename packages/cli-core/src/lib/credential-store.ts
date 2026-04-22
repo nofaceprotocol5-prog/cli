@@ -8,7 +8,7 @@
  */
 
 import { dirname } from "node:path";
-import { mkdir, chmod, unlink } from "node:fs/promises";
+import { mkdir, chmod, writeFile, unlink } from "node:fs/promises";
 import { CREDENTIALS_FILE } from "./constants.ts";
 import { getCurrentEnvName } from "./environment.ts";
 import { log } from "./log.ts";
@@ -142,8 +142,10 @@ async function keyringDelete(): Promise<boolean> {
 async function fileStore(token: string): Promise<void> {
   const path = credentialsFile();
   log.debug(`credentials: storing token in file ${path}`);
-  await mkdir(dirname(path), { recursive: true });
-  await Bun.write(path, token);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, token, { mode: 0o600 });
+  // We keep the chmod because if the file permission had changed
+  // `writeFile` wouldn't set it back to 0o600
   await chmod(path, 0o600);
 }
 
