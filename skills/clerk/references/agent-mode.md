@@ -67,6 +67,34 @@ per CLI invocation when a host-sensitive operation is blocked.
 
 **Rule of thumb:** always pass `--yes` for mutations, `--json` for structured output where available, and `--app` / `--instance` explicitly instead of relying on pickers.
 
+## Passing options as JSON: `--input-json`
+
+Every command accepts `--input-json <json|@file|->`. Keys convert from camelCase/snake_case to kebab-case and expand into flags before Commander parses argv — so anything a command accepts as a flag can come from JSON instead.
+
+```sh
+clerk init --input-json '{"framework":"next","yes":true}'
+clerk config pull --input-json '{"keys":["auth_email","session"]}'  # arrays → repeated flags
+clerk init --input-json @init-opts.json                             # read JSON from a file
+clerk init --input-json -                                           # read JSON from stdin
+echo '{"framework":"next","yes":true}' | clerk init                 # auto-detect piped stdin
+```
+
+When `--input-json` is omitted and stdin is piped (not a TTY), the CLI automatically reads JSON from stdin — no flag needed. This lets agents pipe options directly: `echo '{"yes":true}' | clerk init`.
+
+Positional arguments (e.g. the `<name>` in `clerk apps create <name>`) cannot come from JSON — only flag-style options can.
+
+| JSON             | Expansion                               |
+| ---------------- | --------------------------------------- |
+| `"str"` / number | `--flag <value>`                        |
+| `true`           | `--flag`                                |
+| `false` / `null` | omitted                                 |
+| `["a","b"]`      | `--flag a --flag b` (empty arrays omit) |
+| `{…}` (nested)   | rejected — `invalid_json`, exit `2`     |
+
+**Placement.** Put `--input-json` after the leaf subcommand. Before it, flags land on the root program, so only `--mode` / `--verbose` work there — subcommand flags (`--json`, `--app`, etc.) error as unknown. Explicit flags after `--input-json` override its values (last-flag-wins).
+
+Errors use the standard agent-mode format: bad JSON → `invalid_json`, missing `@file` → `file_not_found`, unknown expanded flags → Commander's `unknown option`. All exit `2`.
+
 ## Exit codes
 
 | Code | Meaning                                                                      |
