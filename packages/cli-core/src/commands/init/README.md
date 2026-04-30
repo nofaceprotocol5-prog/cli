@@ -1,6 +1,6 @@
 # Init Command
 
-Initializes Clerk in a project by authenticating the user, linking a Clerk application, installing the SDK, pulling environment variables, and scaffolding framework-specific boilerplate.
+Initializes Clerk in a project by detecting the framework, installing the SDK, and scaffolding framework-specific boilerplate. Depending on mode and framework support, init either uses keyless development keys or links to a real Clerk application and pulls environment variables.
 
 ## Usage
 
@@ -36,15 +36,18 @@ When running in agent mode (`--mode agent` or non-TTY), the command runs the ful
 - For **existing projects**: framework and package manager are auto-detected, no flags required
 - For **new projects** (`--starter` or blank directory): `--framework` is required (no way to auto-detect in an empty dir). Package manager is auto-selected by availability (bun → pnpm → yarn → npm) unless `--pm` is provided
 - Project name defaults to the framework's default (e.g. `my-clerk-next-app`) unless `--name` is provided
+- For keyless-capable frameworks with no `--app` and no linked profile, init uses keyless and does not require auth
+- For frameworks that require API keys, init will not pick or create an app in agent mode; pass `--app <id>` or link the project first to pull real keys
 
 ## Flow
 
 1. Gathers project context (framework, router variant, TypeScript, `src/` directory, package manager)
-2. Determines auth mode from credential presence (no user prompt):
-   - **Authenticated** (OAuth token or `CLERK_PLATFORM_API_KEY` set): uses the authenticated flow — runs `clerk link` if not already linked and pulls real API keys into `.env` at the end
-   - **Bootstrap + keyless-capable framework + not authenticated**: automatically uses keyless mode — the app runs on auto-generated dev keys and the user can connect a Clerk account later with `clerk auth login`
-   - **Bootstrap + non-keyless framework + not authenticated** (with `--yes` or agent mode): skips authentication and prints manual setup instructions (run `clerk auth login` / `clerk link` / `clerk env pull` when ready)
-   - **Existing project + not authenticated**: runs the authenticated flow, which triggers an interactive login so real keys can be pulled
+2. Determines auth mode:
+   - **Real app target** (`--app` or linked profile): authenticates, links if needed, and pulls real API keys into `.env`
+   - **Agent + keyless-capable framework + no real app target**: uses keyless mode — the app runs on auto-generated dev keys and the user can connect a Clerk account later with `clerk auth login`
+   - **Agent + non-keyless framework + no real app target**: scaffolds locally and prints manual setup instructions instead of selecting or creating an app
+   - **Human mode + bootstrap + keyless-capable framework + not authenticated**: uses keyless mode
+   - **Human mode + existing project + not authenticated**: runs the authenticated flow, which triggers an interactive login so real keys can be pulled
 3. **Authenticated mode only**: authenticates via `clerk auth login` (skipped if already authenticated) and links the project via `clerk link` (skipped if already linked)
 4. Displays detected framework and variant
 5. Detects existing auth libraries (NextAuth, Auth0, Supabase, Firebase, Passport, Better Auth, Kinde) and shows migration guidance
@@ -78,7 +81,7 @@ Detects the project's framework from `package.json` dependencies (checked top-to
 | `express`               | Express        | `@clerk/express`              | `CLERK_PUBLISHABLE_KEY`             | No      |
 | `fastify`               | Fastify        | `@clerk/fastify`              | `CLERK_PUBLISHABLE_KEY`             | No      |
 
-The **Keyless** column indicates whether the framework's Clerk SDK supports keyless mode (auto-generated temporary dev keys). Keyless auto-selection only applies during bootstrap (new projects) — re-running `clerk init` in an existing project always uses the authenticated flow (prompting login when signed out) so real keys can be pulled via `clerk env pull`. During bootstrap of a non-keyless framework with `--yes` and no credentials, `clerk init` skips authentication and prints manual setup instructions instead of blocking on a login prompt.
+The **Keyless** column indicates whether the framework's Clerk SDK supports keyless mode (auto-generated temporary dev keys). In human mode, keyless auto-selection only applies during bootstrap (new projects). In agent mode, keyless-capable frameworks use keyless whenever no real app target is provided by `--app` or a linked profile. For non-keyless frameworks without a real app target, agent mode prints manual setup instructions instead of selecting or creating an app.
 
 Package manager is detected from lock files: `bun.lockb`/`bun.lock` → bun, `yarn.lock` → yarn, `pnpm-lock.yaml` → pnpm, else npm.
 
@@ -223,15 +226,15 @@ Implementation lives in [`skills.ts`](./skills.ts). Note that the E2E fixture se
 
 ## API Endpoints
 
-| Step                   | Method | Base URL                        | Endpoint                       | Description                                                                                                                                         |
-| ---------------------- | ------ | ------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Create accountless app | `POST` | `CLERK_BAPI_URL` (default BAPI) | `/v1/accountless_applications` | Creates a temporary keyless Clerk application; returns `publishable_key`, `secret_key`, and `claim_url`. Only called in the keyless bootstrap path. |
+| Step                   | Method | Base URL                        | Endpoint                       | Description                                                                                                                           |
+| ---------------------- | ------ | ------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Create accountless app | `POST` | `CLERK_BAPI_URL` (default BAPI) | `/v1/accountless_applications` | Creates a temporary keyless Clerk application; returns `publishable_key`, `secret_key`, and `claim_url`. Only called in keyless mode. |
 
 See [auth/README.md](../auth/README.md), [link/README.md](../link/README.md), and [env/README.md](../env/README.md) for the API endpoints used by each step.
 
 ## Keyless breadcrumb
 
-In the keyless bootstrap path, after calling `POST /v1/accountless_applications`, `clerk init` writes `.clerk/keyless.json` to the project root. This file records the claim token extracted from `claim_url` so that `clerk auth login` can automatically claim the temporary application the next time the user authenticates.
+In keyless mode, after calling `POST /v1/accountless_applications`, `clerk init` writes `.clerk/keyless.json` to the project root. This file records the claim token extracted from `claim_url` so that `clerk auth login` can automatically claim the temporary application the next time the user authenticates.
 
 ```json
 {
