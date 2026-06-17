@@ -1,5 +1,6 @@
 import { OAUTH_PROVIDERS } from "@clerk/shared/oauth";
 import { bold, cyan, dim, yellow } from "../../lib/color.ts";
+import { clerkSubdomains } from "./copy.ts";
 import { log } from "../../lib/log.ts";
 import { openBrowser } from "../../lib/open.ts";
 import type { ConfigSchemaProperty, InstanceConfigSchema } from "../../lib/plapi.ts";
@@ -433,24 +434,39 @@ export function providerSetupIntro(provider: OAuthProvider | OAuthProviderDescri
   return [bold(`Configure ${label} OAuth for production`), setupCopy, dim(`Reference: ${docsUrl}`)];
 }
 
+function oauthWalkthroughUrls(
+  domain: string,
+  frontendApiUrl?: string,
+): { authorizedOrigins: string[]; redirectUri: string } {
+  const callbackBase =
+    frontendApiUrl?.replace(/\/+$/, "") ?? `https://${clerkSubdomains(domain).frontendApi}`;
+  return {
+    authorizedOrigins: [`https://${domain}`, `https://www.${domain}`],
+    redirectUri: `${callbackBase}/v1/oauth_callback`,
+  };
+}
+
 /**
  * Show OAuth provider walkthrough values and open provider docs.
  */
 export async function showOAuthWalkthrough(
   provider: OAuthProvider | OAuthProviderDescriptor,
   domain: string,
+  frontendApiUrl?: string,
 ): Promise<void> {
   const descriptor = providerDescriptorFromInput(provider);
   const slug = descriptor?.provider ?? (provider as OAuthProvider);
   const label = descriptor?.label ?? providerLabel(slug);
   const docsUrl = descriptor?.docsUrl ?? providerDocsUrl(slug);
+  const { authorizedOrigins, redirectUri } = oauthWalkthroughUrls(domain, frontendApiUrl);
 
   log.info(`\nConfigure your ${bold(label)} OAuth app with these values:\n`);
   log.info(`  ${dim("Authorized JavaScript origins")}`);
-  log.info(`    ${cyan(`https://${domain}`)}`);
-  log.info(`    ${cyan(`https://www.${domain}`)}`);
+  for (const origin of authorizedOrigins) {
+    log.info(`    ${cyan(origin)}`);
+  }
   log.info(`  ${dim(descriptor?.redirectLabel ?? providerRedirectLabel(slug))}`);
-  log.info(`    ${cyan(`https://accounts.${domain}/v1/oauth_callback`)}`);
+  log.info(`    ${cyan(redirectUri)}`);
   const gotcha = descriptor?.gotcha ?? providerGotcha(slug);
   if (gotcha) {
     log.blank();
