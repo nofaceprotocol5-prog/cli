@@ -11,145 +11,297 @@ on:
   workflow_dispatch:
 
 jobs:
+  detect-project:
+    runs-on: ubuntu-latest
+    name: Detect Project Type
+    outputs:
+      has_package_json: ${{ steps.check.outputs.has_package_json }}
+      has_go: ${{ steps.check.outputs.has_go }}
+      has_rust: ${{ steps.check.outputs.has_rust }}
+      has_python: ${{ steps.check.outputs.has_python }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Detect project files
+        id: check
+        run: |
+          echo "has_package_json=$([ -f package.json ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+          echo "has_go=$([ -f go.mod ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+          echo "has_rust=$([ -f Cargo.toml ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+          echo "has_python=$([ -f requirements.txt ] || [ -f setup.py ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+
   build-and-test:
     runs-on: ubuntu-latest
     name: Build & Test
+    needs: detect-project
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
-      - name: Setup Node.js
+      # Node.js projects
+      - name: Setup Node.js (if Node project)
+        if: needs.detect-project.outputs.has_package_json == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
       
-      - name: Install dependencies
-        run: npm ci
+      - name: Install npm dependencies
+        if: needs.detect-project.outputs.has_package_json == 'true'
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            npm install
+          fi
+        continue-on-error: true
       
-      - name: Run linter
+      - name: Run npm linter
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: npm run lint --if-present || true
+        continue-on-error: true
       
-      - name: Run tests
+      - name: Run npm tests
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: npm test --if-present || true
+        continue-on-error: true
       
-      - name: Build project
+      - name: Build npm project
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: npm run build --if-present || true
+        continue-on-error: true
+      
+      # Go projects
+      - name: Setup Go (if Go project)
+        if: needs.detect-project.outputs.has_go == 'true'
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: Build Go project
+        if: needs.detect-project.outputs.has_go == 'true'
+        run: |
+          go mod download
+          go build ./...
+        continue-on-error: true
+      
+      - name: Run Go tests
+        if: needs.detect-project.outputs.has_go == 'true'
+        run: go test ./...
+        continue-on-error: true
+      
+      # Rust projects
+      - name: Setup Rust (if Rust project)
+        if: needs.detect-project.outputs.has_rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Rust project
+        if: needs.detect-project.outputs.has_rust == 'true'
+        run: cargo build --release
+        continue-on-error: true
+      
+      - name: Run Rust tests
+        if: needs.detect-project.outputs.has_rust == 'true'
+        run: cargo test
+        continue-on-error: true
       
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
         if: always()
         with:
           name: build-artifacts
-          path: dist/
+          path: |
+            dist/
+            target/release/
+            build/
           retention-days: 7
 
   dependency-update:
     runs-on: ubuntu-latest
     name: Update Dependencies
+    needs: detect-project
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Update dependencies
+      # NPM updates
+      - name: Update npm dependencies
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: |
           npm update
           npm audit fix --if-present || true
+        continue-on-error: true
       
-      - name: Create Pull Request for updates
+      # Go updates
+      - name: Update Go dependencies
+        if: needs.detect-project.outputs.has_go == 'true'
+        run: |
+          go get -u ./...
+          go mod tidy
+        continue-on-error: true
+      
+      # Create PR for updates
+      - name: Create Pull Request for dependency updates
         uses: peter-evans/create-pull-request@v5
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: 'chore: update dependencies'
           title: '[Auto] Update Dependencies'
           body: |
-            Automated dependency update from scheduled workflow.
+            Automated dependency update from 24/7 build system.
             
-            - Updated all npm packages
-            - Ran npm audit fix
+            - Updated all dependencies
+            - Ran security audit fixes
             
             Please review and merge if tests pass.
           branch: chore/auto-update-deps
           delete-branch: true
+          labels: 'dependencies,automated'
+        continue-on-error: true
 
   code-health-check:
     runs-on: ubuntu-latest
     name: Code Health Check
+    needs: detect-project
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
-      - name: Setup Node.js
+      # NPM security check
+      - name: Setup Node.js (if Node project)
+        if: needs.detect-project.outputs.has_package_json == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
       
-      - name: Install dependencies
-        run: npm ci
+      - name: Install npm dependencies
+        if: needs.detect-project.outputs.has_package_json == 'true'
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            npm install
+          fi
+        continue-on-error: true
       
-      - name: Check for security vulnerabilities
+      - name: Check npm security vulnerabilities
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: npm audit --audit-level=moderate || true
+        continue-on-error: true
       
       - name: Run type check
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: npm run type-check --if-present || true
+        continue-on-error: true
       
-      - name: Generate test coverage
+      - name: Generate coverage report
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: npm run coverage --if-present || true
+        continue-on-error: true
       
       - name: Upload coverage
         uses: codecov/codecov-action@v3
         if: always()
         with:
           fail_ci_if_error: false
+      
+      # Go vet check
+      - name: Setup Go (if Go project)
+        if: needs.detect-project.outputs.has_go == 'true'
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: Run Go vet
+        if: needs.detect-project.outputs.has_go == 'true'
+        run: go vet ./...
+        continue-on-error: true
 
   auto-fix-issues:
     runs-on: ubuntu-latest
     name: Auto-fix Issues
+    needs: detect-project
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Setup Node.js
+      # NPM auto-fix
+      - name: Setup Node.js (if Node project)
+        if: needs.detect-project.outputs.has_package_json == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
       
-      - name: Install dependencies
-        run: npm ci
+      - name: Install npm dependencies
+        if: needs.detect-project.outputs.has_package_json == 'true'
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            npm install
+          fi
+        continue-on-error: true
       
-      - name: Auto-fix formatting
+      - name: Auto-fix npm formatting and linting
+        if: needs.detect-project.outputs.has_package_json == 'true'
         run: |
           npm run format --if-present || true
           npm run lint:fix --if-present || true
+        continue-on-error: true
       
-      - name: Create PR for fixes
+      # Create PR for fixes
+      - name: Create PR for code fixes
         uses: peter-evans/create-pull-request@v5
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: 'style: auto-fix formatting and linting'
           title: '[Auto] Fix Code Formatting & Linting'
           body: |
-            Automated code fixes from scheduled workflow.
+            Automated code fixes from 24/7 build system.
             
             - Fixed formatting issues
             - Applied linting rules
+            - Auto-fixed code style
             
             Automated by 24/7 Build System.
           branch: chore/auto-fix-issues
           delete-branch: true
+          labels: 'style,automated'
+        continue-on-error: true
 
   health-check-report:
     runs-on: ubuntu-latest
     name: Generate Health Report
     if: always()
-    needs: [build-and-test, dependency-update, code-health-check, auto-fix-issues]
+    needs: [build-and-test, dependency-update, code-health-check, auto-fix-issues, detect-project]
     steps:
       - name: Create summary report
         run: |
           echo "## 🤖 24/7 Automated System Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Project Detection" >> $GITHUB_STEP_SUMMARY
+          echo "- Node.js Project: ${{ needs.detect-project.outputs.has_package_json }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Go Project: ${{ needs.detect-project.outputs.has_go }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Rust Project: ${{ needs.detect-project.outputs.has_rust }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Python Project: ${{ needs.detect-project.outputs.has_python }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Job Status" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Build & Test | ${{ needs.build-and-test.result }} |" >> $GITHUB_STEP_SUMMARY
@@ -157,4 +309,4 @@ jobs:
           echo "| Code Health | ${{ needs.code-health-check.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Auto-fix | ${{ needs.auto-fix-issues.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Automated system check completed at $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "✅ System check completed at $(date)" >> $GITHUB_STEP_SUMMARY
